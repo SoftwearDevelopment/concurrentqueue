@@ -538,6 +538,7 @@ private:
 		inner.swap(other.inner);
 		sema_dequeue.swap(other.sema_dequeue);
 		sema_enqueue.swap(other.sema_enqueue);
+    std::swap(closed_, other.closed_);
 		return *this;
 	}
 	
@@ -1013,6 +1014,7 @@ public:
 	// Attempts to dequeue from the queue.
 	// Returns false if all producer streams appeared empty at the time they
 	// were checked (so, the queue is likely but not guaranteed to be empty).
+  // Also returns false if the queue is finished (closed and drained of all remaining elements).
 	// Never allocates. Thread-safe.
 	template<typename U>
 	inline bool try_dequeue(U& item)
@@ -1030,6 +1032,7 @@ public:
 	// Attempts to dequeue from the queue using an explicit consumer token.
 	// Returns false if all producer streams appeared empty at the time they
 	// were checked (so, the queue is likely but not guaranteed to be empty).
+  // Also returns false if the queue is finished (closed and drained of all remaining elements).
 	// Never allocates. Thread-safe.
 	template<typename U>
 	inline bool try_dequeue(consumer_token_t& token, U& item)
@@ -1048,6 +1051,7 @@ public:
 	// Returns the number of items actually dequeued.
 	// Returns 0 if all producer streams appeared empty at the time they
 	// were checked (so, the queue is likely but not guaranteed to be empty).
+  // Also returns 0 if the queue is finished (closed and drained of all remaining elements).
 	// Never allocates. Thread-safe.
 	template<typename It>
 	inline size_t try_dequeue_bulk(It itemFirst, size_t max)
@@ -1065,6 +1069,7 @@ public:
 	// Returns the number of items actually dequeued.
 	// Returns 0 if all producer streams appeared empty at the time they
 	// were checked (so, the queue is likely but not guaranteed to be empty).
+  // Also returns 0 if the queue is finished (closed and drained of all remaining elements).
 	// Never allocates. Thread-safe.
 	template<typename It>
 	inline size_t try_dequeue_bulk(consumer_token_t& token, It itemFirst, size_t max)
@@ -1082,15 +1087,21 @@ public:
 	
 	// Blocks the current thread until there's something to dequeue, then
 	// dequeues it.
+  // Returns false if the queue is finished (closed and drained of all remaining elements).
 	// Never allocates. Thread-safe.
 	template<typename U>
-	inline void wait_dequeue(U& item)
+	inline bool wait_dequeue(U& item)
 	{
 		sema_dequeue->wait();
 		while (!inner.try_dequeue(item)) {
+      if (closed()) {
+        sema_dequeue->signal();
+        return false;
+      }
 			continue;
 		}
 		sema_enqueue->signal();
+    return true;
 	}
 
 	// Blocks the current thread until either there's something to dequeue
@@ -1099,6 +1110,7 @@ public:
 	// to `item` and returns true.
 	// Using a negative timeout indicates an indefinite timeout,
 	// and is thus functionally equivalent to calling wait_dequeue.
+  // Returns false if the queue is finished (closed and drained of all remaining elements).
 	// Never allocates. Thread-safe.
 	template<typename U>
 	inline bool wait_dequeue_timed(U& item, std::int64_t timeout_usecs)
@@ -1107,6 +1119,10 @@ public:
 			return false;
 		}
 		while (!inner.try_dequeue(item)) {
+      if (closed()) {
+        sema_dequeue->signal();
+        return false;
+      }
 			continue;
 		}
 		sema_enqueue->signal();
@@ -1116,6 +1132,7 @@ public:
     // Blocks the current thread until either there's something to dequeue
 	// or the timeout expires. Returns false without setting `item` if the
     // timeout expires, otherwise assigns to `item` and returns true.
+  // Also returns false if the queue is finished (closed and drained of all remaining elements).
 	// Never allocates. Thread-safe.
 	template<typename U, typename Rep, typename Period>
 	inline bool wait_dequeue_timed(U& item, std::chrono::duration<Rep, Period> const& timeout)
@@ -1125,12 +1142,17 @@ public:
 	
 	// Blocks the current thread until there's something to dequeue, then
 	// dequeues it using an explicit consumer token.
+  // Returns false if the queue is finished (closed and drained of all remaining elements).
 	// Never allocates. Thread-safe.
 	template<typename U>
-	inline void wait_dequeue(consumer_token_t& token, U& item)
+	inline bool wait_dequeue(consumer_token_t& token, U& item)
 	{
 		sema_dequeue->wait();
 		while (!inner.try_dequeue(token, item)) {
+      if (closed()) {
+        sema_dequeue->signal();
+        return false;
+      }
 			continue;
 		}
 		sema_enqueue->signal();
@@ -1142,6 +1164,7 @@ public:
 	// to `item` and returns true.
 	// Using a negative timeout indicates an indefinite timeout,
 	// and is thus functionally equivalent to calling wait_dequeue.
+  // Also returns false if the queue is finished (closed and drained of all remaining elements).
 	// Never allocates. Thread-safe.
 	template<typename U>
 	inline bool wait_dequeue_timed(consumer_token_t& token, U& item, std::int64_t timeout_usecs)
@@ -1150,6 +1173,10 @@ public:
 			return false;
 		}
 		while (!inner.try_dequeue(token, item)) {
+      if (closed()) {
+        sema_dequeue->signal();
+        return false;
+      }
 			continue;
 		}
 		sema_enqueue->signal();
@@ -1159,6 +1186,7 @@ public:
     // Blocks the current thread until either there's something to dequeue
 	// or the timeout expires. Returns false without setting `item` if the
     // timeout expires, otherwise assigns to `item` and returns true.
+  // Also returns false if the queue is finished (closed and drained of all remaining elements).
 	// Never allocates. Thread-safe.
 	template<typename U, typename Rep, typename Period>
 	inline bool wait_dequeue_timed(consumer_token_t& token, U& item, std::chrono::duration<Rep, Period> const& timeout)
@@ -1168,8 +1196,9 @@ public:
 	
 	// Attempts to dequeue several elements from the queue.
 	// Returns the number of items actually dequeued, which will
-	// always be at least one (this method blocks until the queue
+	// be at least one if the queue is not finished(this method blocks until the queue
 	// is non-empty) and at most max.
+  // Returns 0 if the queue is finished (closed and drained of all remaining elements).
 	// Never allocates. Thread-safe.
 	template<typename It>
 	inline size_t wait_dequeue_bulk(It itemFirst, size_t max)
@@ -1177,7 +1206,12 @@ public:
 		size_t count = 0;
 		max = (size_t)sema_dequeue->waitMany((LightweightSemaphore::ssize_t)(ssize_t)max);
 		while (count != max) {
-			count += inner.template try_dequeue_bulk<It&>(itemFirst, max - count);
+		  size_t got = inner.template try_dequeue_bulk<It&>(itemFirst, max - count);
+      if (got == 0 && closed()) {
+        sema_dequeue->signal();
+        return count;
+      }
+      count += got;
 		}
 		sema_enqueue->signal((LightweightSemaphore::ssize_t)(ssize_t)count);
 		return count;
@@ -1189,6 +1223,7 @@ public:
 	// and at most max.
 	// Using a negative timeout indicates an indefinite timeout,
 	// and is thus functionally equivalent to calling wait_dequeue_bulk.
+  // Also returns 0 if the queue is finished (closed and drained of all remaining elements).
 	// Never allocates. Thread-safe.
 	template<typename It>
 	inline size_t wait_dequeue_bulk_timed(It itemFirst, size_t max, std::int64_t timeout_usecs)
@@ -1196,16 +1231,22 @@ public:
 		size_t count = 0;
 		max = (size_t)sema_dequeue->waitMany((LightweightSemaphore::ssize_t)(ssize_t)max, timeout_usecs);
 		while (count != max) {
-			count += inner.template try_dequeue_bulk<It&>(itemFirst, max - count);
+			size_t got = inner.template try_dequeue_bulk<It&>(itemFirst, max - count);
+      if (got == 0 && closed()) {
+        sema_dequeue->signal();
+        return count;
+      }
+      count += got;
 		}
 		sema_enqueue->signal((LightweightSemaphore::ssize_t)(ssize_t)count);
 		return count;
 	}
     
-    // Attempts to dequeue several elements from the queue.
+  // Attempts to dequeue several elements from the queue.
 	// Returns the number of items actually dequeued, which can
 	// be 0 if the timeout expires while waiting for elements,
 	// and at most max.
+  // Also returns 0 if the queue is finished (closed and drained of all remaining elements).
 	// Never allocates. Thread-safe.
 	template<typename It, typename Rep, typename Period>
 	inline size_t wait_dequeue_bulk_timed(It itemFirst, size_t max, std::chrono::duration<Rep, Period> const& timeout)
@@ -1217,6 +1258,7 @@ public:
 	// Returns the number of items actually dequeued, which will
 	// always be at least one (this method blocks until the queue
 	// is non-empty) and at most max.
+  // Also returns 0 if the queue is finished (closed and drained of all remaining elements).
 	// Never allocates. Thread-safe.
 	template<typename It>
 	inline size_t wait_dequeue_bulk(consumer_token_t& token, It itemFirst, size_t max)
@@ -1224,7 +1266,12 @@ public:
 		size_t count = 0;
 		max = (size_t)sema_dequeue->waitMany((LightweightSemaphore::ssize_t)(ssize_t)max);
 		while (count != max) {
-			count += inner.template try_dequeue_bulk<It&>(token, itemFirst, max - count);
+			size_t got = inner.template try_dequeue_bulk<It&>(token, itemFirst, max - count);
+      if (got == 0 && closed()) {
+        sema_dequeue->signal();
+        return count;
+      }
+      count += got;
 		}
 		sema_enqueue->signal((LightweightSemaphore::ssize_t)(ssize_t)count);
 		return count;
@@ -1236,6 +1283,7 @@ public:
 	// and at most max.
 	// Using a negative timeout indicates an indefinite timeout,
 	// and is thus functionally equivalent to calling wait_dequeue_bulk.
+  // Also returns 0 if the queue is finished (closed and drained of all remaining elements).
 	// Never allocates. Thread-safe.
 	template<typename It>
 	inline size_t wait_dequeue_bulk_timed(consumer_token_t& token, It itemFirst, size_t max, std::int64_t timeout_usecs)
@@ -1243,7 +1291,12 @@ public:
 		size_t count = 0;
 		max = (size_t)sema_dequeue->waitMany((LightweightSemaphore::ssize_t)(ssize_t)max, timeout_usecs);
 		while (count != max) {
-			count += inner.template try_dequeue_bulk<It&>(token, itemFirst, max - count);
+			size_t got = inner.template try_dequeue_bulk<It&>(token, itemFirst, max - count);
+      if (got == 0 && closed()) {
+        sema_dequeue->signal();
+        return count;
+      }
+      count += got;
 		}
 		sema_enqueue->signal((LightweightSemaphore::ssize_t)(ssize_t)count);
 		return count;
@@ -1253,13 +1306,46 @@ public:
 	// Returns the number of items actually dequeued, which can
 	// be 0 if the timeout expires while waiting for elements,
 	// and at most max.
+  // Also returns 0 if the queue is finished (closed and drained of all remaining elements).
 	// Never allocates. Thread-safe.
 	template<typename It, typename Rep, typename Period>
 	inline size_t wait_dequeue_bulk_timed(consumer_token_t& token, It itemFirst, size_t max, std::chrono::duration<Rep, Period> const& timeout)
     {
         return wait_dequeue_bulk_timed<It&>(token, itemFirst, max, std::chrono::duration_cast<std::chrono::microseconds>(timeout).count());
     }
-	
+
+  // Close the queue.
+  // This signals that no more data will be enqueued to dequeue operations.
+  // Further dequeue operations will behave normally until the queue is
+  // completely drained (finished() == true). After that, any dequeue calls
+  // will immediately fail and return.
+  // Callers should check finished() to abort any dequeue loops.
+  // The caller must make sure, that when calling close() all enqueue operations
+  // have finished and no more calls to any enqueue method will be made.
+	// Thread-safe.
+  inline void close()
+  {
+	  bool old_closed = closed_.exchange(true, std::memory_order_relaxed, std::memory_order_relaxed);
+    if (!old_closed) {
+		  sema_dequeue->signal();
+    }
+  }
+
+  // Whether close() has been called on this queue.
+  // When the queue is closed, not enqueue calls must be made.
+  // Thread-safe.
+  inline bool closed() const
+  {
+    return closed_;
+  }
+
+  // A queue is finished when no data can be dequeued any more.
+  // All dequeue calls will fail unsuccessfully.
+  // Thread-safe.
+  inline bool finished() const
+  {
+    return closed() && size_approx() == 0;
+  }
 	
 	// Returns an estimate of the total number of elements currently in the queue. This
 	// estimate is only accurate if the queue has completely stabilized before it is called
@@ -1320,7 +1406,7 @@ private:
 private:
 	ConcurrentQueue inner;
 	std::unique_ptr<LightweightSemaphore, void (*)(LightweightSemaphore*)> sema_dequeue, sema_enqueue;
-  std::atomic<bool> closed;
+  std::atomic<bool> closed_{false};
 };
 
 
